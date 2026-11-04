@@ -1,0 +1,38 @@
+# QQ物联风格 视频通话系统 - Docker编排
+# 信令服务器(Node) + TURN中继(coturn)
+# 用法:  cd /workspace/qq-video-rtc && docker compose up -d
+version: "3.8"
+
+services:
+  signaling:
+    build: ./server
+    container_name: qqvideo-signaling
+    restart: unless-stopped
+    environment:
+      # 对外暴露的公网地址，客户端用这个连信令
+      # 改成你树莓派的公网IP或域名
+      PUBLIC_URL: ${PUBLIC_URL:-ws://192.168.199.100:9001}
+      # TURN服务信息，下发给客户端用于打洞失败时中继
+      TURN_URL: ${TURN_URL:-turn:192.168.199.100:3478?transport=udp}
+      TURN_USER: ${TURN_USER:-qqvideo}
+      TURN_PASS: ${TURN_PASS:-qqvideo123}
+      # 端口
+      SIGNAL_PORT: "9001"
+    ports:
+      - "9001:9001"
+    volumes:
+      - ./data/signaling:/data   # 持久化联系人/通话记录
+
+  turn:
+    image: coturn/coturn:latest
+    container_name: qqvideo-turn
+    restart: unless-stopped
+    network_mode: host
+    command: >
+      -n --log-file=stdout
+      --lt-cred-mech
+      --user ${TURN_USER:-qqvideo}:${TURN_PASS:-qqvideo123}
+      --realm qqvideo
+      --listening-port 3478
+      --min-port 49160 --max-port 49200
+    # TURN用UDP 3478 + 中继端口段，host网络模式直接透传
