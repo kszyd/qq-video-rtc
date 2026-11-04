@@ -1,19 +1,17 @@
 // 信令服务 - 主服务
-// WebSocket 服务：设备注册、联系人列表、拨号/接听/挂断、SDP/ICE 转发、通话记录
-// 并发5路以下，纯JSON文件存储够用
+// WebSocket 服务：设备注册、联系人列表、拨号/接听/挂断、SDP/ICE 转发、通话记录、群聊
 const WebSocket = require('ws');
 const http = require('http');
 const store = require('./store');
 
 const PORT = process.env.SIGNAL_PORT || 9001;
-const PUBLIC_URL = process.env.PUBLIC_URL || 'ws://127.0.0.1:9001';
-const TURN_URL = process.env.TURN_URL || 'turn:127.0.0.1:3478?transport=udp';
+const PUBLIC_URL = process.env.PUBLIC_URL || 'ws://www.ckszyd.top:9001';
+const TURN_URL = process.env.TURN_URL || 'turn:www.ckszyd.top:3478?transport=udp';
 const TURN_USER = process.env.TURN_USER || 'qqvideo';
 const TURN_PASS = process.env.TURN_PASS || 'qqvideo123';
 
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  // 静态页面
   if (req.url === '/' || req.url === '/index.html') {
     const fs = require('fs');
     const path = require('path');
@@ -29,7 +27,6 @@ const server = http.createServer((req, res) => {
       return;
     }
   }
-  // 简单健康检查
   res.setHeader('Content-Type', 'application/json');
   if (req.url === '/health') {
     res.end(JSON.stringify({ ok: true, online: store.online.size }));
@@ -40,7 +37,6 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocket.Server({ server });
 
-// 消息发送工具
 function send(ws, obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
@@ -50,34 +46,21 @@ function sendError(ws, msg) {
   send(ws, { type: 'error', message: msg });
 }
 
-// 每个连接挂一个 id
 wss.on('connection', (ws) => {
   ws.userId = null;
-  console.log('[conn] 新连接');
-
   ws.on('message', (raw) => {
     let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      sendError(ws, '非法JSON');
-      return;
-    }
+    try { msg = JSON.parse(raw.toString()); } catch (e) { sendError(ws, '非法JSON'); return; }
     handle(ws, msg);
   });
-
   ws.on('close', () => {
     if (ws.userId) {
       store.setOffline(ws.userId);
       broadcastOnline();
-      console.log('[conn] 离线', ws.userId);
     }
   });
-
-  ws.on('error', () => {});
 });
 
-// ---------------- 消息处理 ----------------
 function handle(ws, msg) {
   switch (msg.type) {
     case 'register': return onRegister(ws, msg);
@@ -89,19 +72,20 @@ function handle(ws, msg) {
     case 'sdp': return onSdp(ws, msg);
     case 'ice': return onIce(ws, msg);
     case 'calls': return onCalls(ws, msg);
-    default:
-      sendError(ws, '未知消息类型: ' + msg.type);
+    // 群组相关
+    case 'group-create': return onGroupCreate(ws, msg);
+    case 'group-invite': return onGroupInvite(ws, msg);
+    case 'group-call': return onGroupCall(ws, msg);
+    case 'group-join': return onGroupJoin(ws, msg);
+    default: sendError(ws, '未知消息类型: ' + msg.type);
   }
 }
 
-// 注册/登录：参数 {id, name}
 function onRegister(ws, msg) {
   if (!msg.id) { sendError(ws, '缺少id'); return; }
   const id = String(msg.id);
-  // 踢掉旧连接（同一设备重复登录）
   const old = store.getWs(id);
   if (old && old !== ws) {
-    old.userId = null; // 标记为已顶替，旧连接发消息会被忽略
     send(old, { type: 'kicked', message: '该账号已在其他设备登录' });
     try { old.close(); } catch (e) {}
   }
@@ -115,15 +99,12 @@ function onRegister(ws, msg) {
     serverInfo: { publicUrl: PUBLIC_URL, turn: { url: TURN_URL, username: TURN_USER, credential: TURN_PASS } },
   });
   broadcastOnline();
-  console.log('[register]', id);
 }
 
-// 联系人列表
 function onContacts(ws) {
   send(ws, { type: 'contacts', list: store.listUsers() });
 }
 
-// 拨号：{callee}
 function onCall(ws, msg) {
   const caller = ws.userId;
   if (!caller) { sendError(ws, '未注册'); return; }
@@ -131,81 +112,133 @@ function onCall(ws, msg) {
   const u = store.getUser(callee);
   if (!u) { sendError(ws, '对方不存在'); return; }
   if (!store.isOnline(callee)) {
-    // 记录一次未接来电
-    store.addCall({ caller, callee, start: Date.now(), status: 'missed' });
+    store.addCall({ caller, callee, start: Date.now(), status: 'missed', type: 'single' });
     send(ws, { type: 'callee-offline', callee });
     return;
   }
-  // 通知被叫：incoming
   send(store.getWs(callee), { type: 'incoming', caller, callerName: store.getUser(caller).name });
   send(ws, { type: 'calling', callee, calleeName: u.name });
 }
 
-// 接听
 function onAccept(ws, msg) {
   const callee = ws.userId;
   if (!callee) { sendError(ws, '未注册'); return; }
   const caller = String(msg.caller);
   const callerWs = store.getWs(caller);
   if (!callerWs) { sendError(ws, '主叫已离线'); return; }
-  store.addCall({ caller, callee, start: Date.now(), status: 'active' });
+  store.addCall({ caller, callee, start: Date.now(), status: 'active', type: 'single' });
   send(callerWs, { type: 'accepted', callee, calleeName: store.getUser(callee).name });
   send(ws, { type: 'peer-ready', peer: caller, peerName: store.getUser(caller).name });
 }
 
-// 拒接
 function onReject(ws, msg) {
   const callee = ws.userId;
   if (!callee) { sendError(ws, '未注册'); return; }
   const caller = String(msg.caller);
   const callerWs = store.getWs(caller);
   if (callerWs) {
-    store.addCall({ caller, callee, start: Date.now(), status: 'rejected' });
+    store.addCall({ caller, callee, start: Date.now(), status: 'rejected', type: 'single' });
     send(callerWs, { type: 'rejected', callee });
   }
 }
 
-// 挂断
 function onHangup(ws, msg) {
   const who = ws.userId;
   if (!who) return;
   const peer = String(msg.peer);
   const peerWs = store.getWs(peer);
   if (peerWs) send(peerWs, { type: 'hangup', by: who });
-  // 通话记录在这里补结束时间(如果有对应活动通话)
-  // 简单的处理：通知对面即可，记录由accept时那条补
+  
+  // 结束通话记录
+  const activeCall = store.listCalls(who).find(c => c.status === 'active' && (c.caller === who || c.callee === who));
+  if (activeCall) store.updateCall(activeCall.id, { end: Date.now(), status: 'ended' });
 }
 
-// SDP 转发: {to, sdp}
 function onSdp(ws, msg) {
   const from = ws.userId;
   const to = String(msg.to);
   const toWs = store.getWs(to);
-  if (toWs) {
-    send(toWs, { type: 'sdp', from, sdp: msg.sdp });
-  } else {
-    sendError(ws, '对方已离线');
-  }
+  if (toWs) send(toWs, { type: 'sdp', from, sdp: msg.sdp });
 }
 
-// ICE 转发: {to, candidate}
 function onIce(ws, msg) {
   const from = ws.userId;
   const to = String(msg.to);
   const toWs = store.getWs(to);
-  if (toWs) {
-    send(toWs, { type: 'ice', from, candidate: msg.candidate });
+  if (toWs) send(toWs, { type: 'ice', from, candidate: msg.candidate });
+}
+
+function onCalls(ws, msg) {
+  if (!ws.userId) return;
+  // 管理端(不传self)看全部记录；普通用户传self看自己的
+  if (msg.self) {
+    send(ws, { type: 'calls', list: store.listCalls(String(msg.self)) });
+  } else {
+    send(ws, { type: 'calls', list: store.listCalls() });
   }
 }
 
-// 通话记录查询
-function onCalls(ws, msg) {
-  if (!ws.userId) return;
-  const userId = msg.self || ws.userId;
-  send(ws, { type: 'calls', list: store.listCalls(userId) });
+// ---------------- 群组信令 (Mesh 拓扑) ----------------
+function onGroupCreate(ws, msg) {
+  const ownerId = ws.userId;
+  if (!ownerId) { sendError(ws, '未注册'); return; }
+  const group = store.createGroup(ownerId, msg.name || '新群组');
+  send(ws, { type: 'group-created', group });
 }
 
-// 广播在线状态变化
+function onGroupInvite(ws, msg) {
+  const inviter = ws.userId;
+  if (!inviter) { sendError(ws, '未注册'); return; }
+  const { gid, targetId } = msg;
+  const group = store.addUserToGroup(gid, targetId);
+  if (!group) { sendError(ws, '群组不存在'); return; }
+  
+  const targetWs = store.getWs(targetId);
+  if (targetWs) {
+    send(targetWs, { type: 'group-invited', gid, groupName: group.name, inviter });
+  }
+  send(ws, { type: 'group-invited-ok', gid, targetId });
+}
+
+function onGroupCall(ws, msg) {
+  const caller = ws.userId;
+  if (!caller) { sendError(ws, '未注册'); return; }
+  const { gid } = msg;
+  const group = store.getGroup(gid);
+  if (!group) { sendError(ws, '群组不存在'); return; }
+
+  // 1. 记录群通话
+  store.addCall({ caller, callee: 'group', groupId: gid, start: Date.now(), status: 'active', type: 'group' });
+
+  // 2. 通知所有在线成员 (除了自己)
+  group.members.forEach(mid => {
+    if (mid === caller) return;
+    const midWs = store.getWs(mid);
+    if (midWs) {
+      send(midWs, { type: 'incoming-group', gid, caller, callerName: store.getUser(caller).name, members: group.members });
+    }
+  });
+  send(ws, { type: 'group-calling', gid, members: group.members });
+}
+
+function onGroupJoin(ws, msg) {
+  const joiner = ws.userId;
+  if (!joiner) { sendError(ws, '未注册'); return; }
+  const { gid } = msg;
+  const group = store.getGroup(gid);
+  if (!group) { sendError(ws, '群组不存在'); return; }
+
+  // 通知群内所有其他在线成员：有人加入了，现在请与我建连接
+  group.members.forEach(mid => {
+    if (mid === joiner) return;
+    const midWs = store.getWs(mid);
+    if (midWs) {
+      send(midWs, { type: 'group-member-joined', gid, joiner, joinerName: store.getUser(joiner).name });
+    }
+  });
+  send(ws, { type: 'group-joined-ok', gid, members: group.members });
+}
+
 function broadcastOnline() {
   const list = store.listUsers();
   wss.clients.forEach((c) => {
