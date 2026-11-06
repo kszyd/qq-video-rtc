@@ -5,10 +5,10 @@ const http = require('http');
 const store = require('./store');
 
 const PORT = process.env.SIGNAL_PORT || 9001;
-const PUBLIC_URL = process.env.PUBLIC_URL || 'ws://www.ckszyd.top:9001';
-const TURN_URL = process.env.TURN_URL || 'turn:www.ckszyd.top:3478?transport=udp';
-const TURN_USER = process.env.TURN_USER || 'qqvideo';
-const TURN_PASS = process.env.TURN_PASS || 'qqvideo123';
+const PUBLIC_URL = process.env.PUBLIC_URL || 'ws://192.168.199.100:9001';
+const TURN_URL = process.env.TURN_URL || 'turn:192.168.199.100:3478?transport=udp';
+const TURN_USER = process.env.TURN_USER || 'videotv';
+const TURN_PASS = process.env.TURN_PASS || 'videotv123';
 
 const server = http.createServer((req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -32,7 +32,7 @@ const server = http.createServer((req, res) => {
     res.end(JSON.stringify({ ok: true, online: store.online.size }));
     return;
   }
-  res.end(JSON.stringify({ ok: true, service: 'qqvideo-signaling' }));
+  res.end(JSON.stringify({ ok: true, service: 'videotv' }));
 });
 
 const wss = new WebSocket.Server({ server });
